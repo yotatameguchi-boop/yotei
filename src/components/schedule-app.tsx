@@ -7,6 +7,7 @@ import { GoalForm } from "@/components/goal-form";
 import { HabitForm } from "@/components/habit-form";
 import { ScheduleTimeline } from "@/components/schedule-timeline";
 import { SyncStatus } from "@/components/sync-status";
+import { useGoogleTokenRefresh } from "@/components/google-sign-in-button";
 import { WeekCalendar } from "@/components/week-calendar";
 import {
   createDemoGoals,
@@ -34,14 +35,6 @@ const INIT_KEY = "yotei-initialized";
 const DEMO_EVENTS_KEY = "yotei-use-demo-events";
 const AUTO_SYNC_DEBOUNCE_MS = 1500;
 
-const AUTH_MESSAGES: Record<string, string> = {
-  connected: "Googleカレンダーに接続しました。自動同期を開始します…",
-  error: "Googleカレンダーへの接続がキャンセルされました",
-  failed: "Googleカレンダーへの接続に失敗しました",
-  invalid_state: "認証セッションが無効です。もう一度お試しください",
-  missing: "認証情報が不足しています",
-};
-
 type SyncResponse = {
   googleEvents: CalendarEvent[];
   scheduled: ScheduledBlock[];
@@ -50,29 +43,11 @@ type SyncResponse = {
   syncedAt: string;
 };
 
-function readAuthState(): { message: string | null; justConnected: boolean } {
-  if (typeof window === "undefined") {
-    return { message: null, justConnected: false };
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  const auth = params.get("auth");
-  if (!auth || !AUTH_MESSAGES[auth]) {
-    return { message: null, justConnected: false };
-  }
-
-  window.history.replaceState({}, "", window.location.pathname);
-  return {
-    message: AUTH_MESSAGES[auth],
-    justConnected: auth === "connected",
-  };
-}
-
 type ScheduleAppProps = {
   initialConnected: boolean;
   initialConfigured: boolean;
   initialGoogleEvents: CalendarEvent[];
-  redirectUri: string;
+  googleClientId: string;
   rangeStart: string;
   rangeEnd: string;
 };
@@ -81,7 +56,7 @@ export function ScheduleApp({
   initialConnected,
   initialConfigured,
   initialGoogleEvents,
-  redirectUri,
+  googleClientId,
   rangeStart,
   rangeEnd,
 }: ScheduleAppProps) {
@@ -124,11 +99,7 @@ export function ScheduleApp({
   const [loading, setLoading] = useState(false);
   const [autoSync, setAutoSync] = useState(loadAutoSync);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const [boot] = useState(readAuthState);
   const [message, setMessage] = useState<string | null>(() => {
-    if (boot.message) {
-      return boot.message;
-    }
     if (initialGoogleEvents.length > 0) {
       return `Googleカレンダーから ${initialGoogleEvents.length} 件の予定を読み込みました`;
     }
@@ -146,6 +117,7 @@ export function ScheduleApp({
   const connectedRef = useRef(connected);
   const autoSyncRef = useRef(autoSync);
   const initialSyncDoneRef = useRef(false);
+  const pendingConnectSyncRef = useRef(false);
 
   useEffect(() => {
     habitsRef.current = habits;
@@ -153,6 +125,8 @@ export function ScheduleApp({
     connectedRef.current = connected;
     autoSyncRef.current = autoSync;
   }, [habits, goals, connected, autoSync]);
+
+  const { refreshSilently } = useGoogleTokenRefresh(googleClientId, connected);
 
   const refreshAuthStatus = useCallback(async () => {
     const response = await fetch("/api/auth/status");
@@ -173,7 +147,7 @@ export function ScheduleApp({
     setSyncing(true);
 
     try {
-      const response = await fetch("/api/calendar/sync", {
+      let response = await fetch("/api/calendar/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -184,6 +158,23 @@ export function ScheduleApp({
           pushToGoogle: true,
         }),
       });
+
+      if (response.status === 401) {
+        const refreshed = await refreshSilently();
+        if (refreshed) {
+          response = await fetch("/api/calendar/sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              habits: habitsRef.current,
+              goals: goalsRef.current,
+              rangeStart,
+              rangeEnd,
+              pushToGoogle: true,
+            }),
+          });
+        }
+      }
 
       if (!response.ok) {
         const data = (await response.json()) as { error?: string };
@@ -207,7 +198,7 @@ export function ScheduleApp({
     } finally {
       setSyncing(false);
     }
-  }, [rangeEnd, rangeStart]);
+  }, [rangeEnd, rangeStart, refreshSilently]);
 
   const runLocalGenerate = useCallback(async () => {
     setLoading(true);
@@ -279,21 +270,39 @@ export function ScheduleApp({
       return;
     }
 
-    const delay =
-      !initialSyncDoneRef.current && boot.justConnected
+    const delay = !initialSyncDoneRef.current
+      ? pendingConnectSyncRef.current
         ? 0
-        : initialSyncDoneRef.current
-          ? AUTO_SYNC_DEBOUNCE_MS
-          : 300;
+        : 300
+      : AUTO_SYNC_DEBOUNCE_MS;
 
     initialSyncDoneRef.current = true;
+    pendingConnectSyncRef.current = false;
 
     const timer = window.setTimeout(() => {
       void runSyncRef.current();
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [boot.justConnected, connected, autoSync, habits, goals]);
+  }, [connected, autoSync, habits, goals]);
+
+  const handleConnected = useCallback(() => {
+    pendingConnectSyncRef.current = true;
+    initialSyncDoneRef.current = false;
+    setConnected(true);
+    setMessage("Googleカレンダーに接続しました。自動同期を開始します…");
+    void refreshAuthStatus();
+  }, [refreshAuthStatus]);
+
+  const handleDisconnect = useCallback(() => {
+    void fetch("/api/auth/logout", { method: "POST" }).then(() => {
+      setConnected(false);
+      setGoogleEvents([]);
+      setScheduled([]);
+      setUnscheduled([]);
+      setMessage("Googleカレンダーとの連携を解除しました");
+    });
+  }, []);
 
   const timelineEvents = useMemo(() => {
     if (connected) {
@@ -336,24 +345,13 @@ export function ScheduleApp({
         <GoogleConnect
           connected={connected}
           configured={configured}
+          clientId={googleClientId}
           eventCount={googleEvents.length}
-          redirectUri={redirectUri}
           autoSync={autoSync}
           syncing={syncing}
-          onStatusChange={() => {
-            void refreshAuthStatus().then(async (status) => {
-              if (status.connected) {
-                initialSyncDoneRef.current = false;
-                if (autoSyncRef.current) {
-                  await runSyncRef.current();
-                }
-              } else {
-                setGoogleEvents([]);
-                setScheduled([]);
-                setUnscheduled([]);
-              }
-            });
-          }}
+          onConnected={handleConnected}
+          onDisconnect={handleDisconnect}
+          onError={setMessage}
         />
 
         <SyncStatus
@@ -388,7 +386,7 @@ export function ScheduleApp({
                   void runLocalGenerate();
                 }}
               >
-                {loading ? "生成中..." : "スケジュールを生成"}
+                {loading ? "生成中..." : "スケジュールを生成（オフライン）"}
               </button>
               <button type="button" className="btn-secondary" onClick={loadDemoData}>
                 デモデータ

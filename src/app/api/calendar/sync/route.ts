@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getGoogleTokens, saveGoogleTokens } from "@/lib/auth";
+import { getGoogleTokens } from "@/lib/auth";
 import { generateFromInput, type SyncCalendarRequest } from "@/lib/calendar-sync";
 import {
-  getAuthorizedClient,
   listCalendarEvents,
   listExternalBusyEvents,
   upsertScheduledBlocks,
@@ -10,7 +9,7 @@ import {
 
 export async function POST(request: NextRequest) {
   const tokens = await getGoogleTokens();
-  if (!tokens) {
+  if (!tokens?.accessToken) {
     return NextResponse.json({ error: "Google Calendar is not connected" }, { status: 401 });
   }
 
@@ -21,11 +20,8 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { tokens: refreshedTokens } = await getAuthorizedClient(tokens);
-    await saveGoogleTokens(refreshedTokens);
-
     const externalEvents = await listExternalBusyEvents(
-      refreshedTokens,
+      tokens,
       body.rangeStart,
       body.rangeEnd,
     );
@@ -37,7 +33,7 @@ export async function POST(request: NextRequest) {
 
     if (shouldPush && schedule.scheduled.length > 0) {
       pushed = await upsertScheduledBlocks(
-        refreshedTokens,
+        tokens,
         schedule.scheduled,
         body.rangeStart,
         body.rangeEnd,
@@ -45,7 +41,7 @@ export async function POST(request: NextRequest) {
     }
 
     const googleEvents = await listCalendarEvents(
-      refreshedTokens,
+      tokens,
       body.rangeStart,
       body.rangeEnd,
     );
@@ -59,6 +55,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to sync calendar";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message === "TOKEN_EXPIRED" ? 401 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

@@ -2,36 +2,34 @@ import { cookies } from "next/headers";
 import type { GoogleTokenPayload } from "./types";
 
 const TOKEN_COOKIE = "yotei_google_tokens";
-const STATE_COOKIE = "yotei_oauth_state";
 
-function getAuthSecret(): string | null {
-  return process.env.AUTH_SECRET ?? null;
+function getAuthSecret(): string {
+  if (process.env.AUTH_SECRET) {
+    return process.env.AUTH_SECRET;
+  }
+
+  const host =
+    process.env.VERCEL_URL ??
+    process.env.NEXT_PUBLIC_APP_URL?.replace(/^https?:\/\//, "") ??
+    "localhost";
+
+  return `yotei-cookie-${host}`;
 }
 
 function encodePayload(payload: unknown): string {
-  const secret = getAuthSecret();
-  if (!secret) {
-    throw new Error("AUTH_SECRET is not configured");
-  }
-
   const json = JSON.stringify(payload);
   const data = Buffer.from(json, "utf8").toString("base64url");
-  const signature = Buffer.from(`${data}.${secret}`, "utf8").toString("base64url");
+  const signature = Buffer.from(`${data}.${getAuthSecret()}`, "utf8").toString("base64url");
   return `${data}.${signature}`;
 }
 
 function decodePayload<T>(value: string): T | null {
-  const secret = getAuthSecret();
-  if (!secret) {
-    return null;
-  }
-
   const [data, signature] = value.split(".");
   if (!data || !signature) {
     return null;
   }
 
-  const expected = Buffer.from(`${data}.${secret}`, "utf8").toString("base64url");
+  const expected = Buffer.from(`${data}.${getAuthSecret()}`, "utf8").toString("base64url");
   if (signature !== expected) {
     return null;
   }
@@ -41,24 +39,6 @@ function decodePayload<T>(value: string): T | null {
   } catch {
     return null;
   }
-}
-
-export async function setOAuthState(state: string) {
-  const store = await cookies();
-  store.set(STATE_COOKIE, state, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 10,
-  });
-}
-
-export async function consumeOAuthState(state: string): Promise<boolean> {
-  const store = await cookies();
-  const saved = store.get(STATE_COOKIE)?.value;
-  store.delete(STATE_COOKIE);
-  return Boolean(saved && saved === state);
 }
 
 export async function saveGoogleTokens(tokens: GoogleTokenPayload) {
@@ -86,10 +66,19 @@ export async function clearGoogleTokens() {
   store.delete(TOKEN_COOKIE);
 }
 
-export function googleConfigured(): boolean {
-  return Boolean(
-    process.env.GOOGLE_CLIENT_ID &&
-      process.env.GOOGLE_CLIENT_SECRET &&
-      process.env.AUTH_SECRET,
-  );
+export function tokenExpiringSoon(tokens: GoogleTokenPayload | null): boolean {
+  if (!tokens?.expiryDate) {
+    return false;
+  }
+  return tokens.expiryDate <= Date.now() + 5 * 60_000;
+}
+
+export function tokenValid(tokens: GoogleTokenPayload | null): boolean {
+  if (!tokens?.accessToken) {
+    return false;
+  }
+  if (!tokens.expiryDate) {
+    return true;
+  }
+  return tokens.expiryDate > Date.now() + 30_000;
 }

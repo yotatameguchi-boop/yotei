@@ -1,67 +1,68 @@
 "use client";
 
-import { GoogleSetupGuide } from "@/components/google-setup-guide";
+import { GoogleSignInButton } from "@/components/google-sign-in-button";
 
 type GoogleConnectProps = {
   connected: boolean;
   configured: boolean;
+  clientId: string;
   eventCount: number;
-  redirectUri: string;
   autoSync: boolean;
   syncing: boolean;
-  onStatusChange: () => void;
+  onConnected: () => void;
+  onDisconnect: () => void;
+  onError: (message: string) => void;
 };
 
 export function GoogleConnect({
   connected,
   configured,
+  clientId,
   eventCount,
-  redirectUri,
   autoSync,
   syncing,
-  onStatusChange,
+  onConnected,
+  onDisconnect,
+  onError,
 }: GoogleConnectProps) {
-  async function disconnect() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    onStatusChange();
-  }
-
   return (
     <section className="panel p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-bold">Googleカレンダー</h2>
           <p className="text-sm text-[var(--muted)]">
-            接続するだけで、予定の取得・生成・反映が自動で動きます。
+            ボタンを押すだけで、予定の取得・生成・反映まで自動で行います。
           </p>
           {connected ? (
             <p className="mt-1 text-xs text-[var(--teal-deep)]">
               連携中 · 予定 {eventCount} 件
-              {autoSync ? " · 自動同期 ON" : " · 手動モード"}
+              {autoSync ? " · 自動同期 ON" : ""}
               {syncing ? " · 同期中..." : ""}
             </p>
           ) : null}
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {!configured ? (
-            <span className="chip">OAuth 未設定</span>
-          ) : connected ? (
+          {connected ? (
             <>
               <span className="chip">接続済み</span>
-              <button type="button" className="btn-secondary text-sm" onClick={disconnect}>
+              <button type="button" className="btn-secondary text-sm" onClick={onDisconnect}>
                 切断
               </button>
             </>
+          ) : configured ? (
+            <GoogleSignInButton
+              clientId={clientId}
+              onConnected={onConnected}
+              onError={onError}
+            />
           ) : (
-            <a href="/api/auth/google" className="btn-primary text-sm no-underline">
-              Googleで接続（自動同期開始）
-            </a>
+            <p className="text-sm text-[var(--muted)]">
+              カレンダー連携の準備中です。しばらくお待ちください。
+            </p>
           )}
         </div>
       </div>
-
-      {!configured ? <GoogleSetupGuide redirectUri={redirectUri} /> : null}
     </section>
   );
 }

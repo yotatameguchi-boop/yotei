@@ -1,86 +1,30 @@
 import { google } from "googleapis";
+import { getGoogleClientId } from "./google-config";
 import type { ScheduledBlock } from "./types";
 import { buildYoteiKey, yoteiEventTitle } from "./yotei-calendar-key";
 
-const SCOPES = [
-  "https://www.googleapis.com/auth/calendar.readonly",
-  "https://www.googleapis.com/auth/calendar.events",
-];
-
 const TIMEZONE = "Asia/Tokyo";
 
-export function getOAuthClient() {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const redirectUri =
-    process.env.GOOGLE_REDIRECT_URI ??
-    `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/api/auth/callback`;
-
-  if (!clientId || !clientSecret) {
-    throw new Error("Google OAuth credentials are not configured");
-  }
-
-  return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
-}
-
-export function getAuthUrl(state: string): string {
-  const client = getOAuthClient();
-  return client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: SCOPES,
-    state,
-  });
-}
-
-export async function exchangeCodeForTokens(code: string) {
-  const client = getOAuthClient();
-  const { tokens } = await client.getToken(code);
-
-  if (!tokens.access_token) {
-    throw new Error("Google did not return an access token");
-  }
-
-  return {
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token ?? undefined,
-    expiryDate: tokens.expiry_date ?? undefined,
-  };
-}
-
-export async function getAuthorizedClient(tokens: {
+export type GoogleAccessToken = {
   accessToken: string;
-  refreshToken?: string;
   expiryDate?: number;
-}) {
-  const client = getOAuthClient();
-  const nextTokens = { ...tokens };
+};
 
-  client.setCredentials({
-    access_token: nextTokens.accessToken,
-    refresh_token: nextTokens.refreshToken,
-    expiry_date: nextTokens.expiryDate,
-  });
+function getAuthClient(accessToken: string) {
+  const clientId = getGoogleClientId() ?? "";
+  const auth = new google.auth.OAuth2(clientId);
+  auth.setCredentials({ access_token: accessToken });
+  return auth;
+}
 
-  if (
-    nextTokens.expiryDate &&
-    nextTokens.expiryDate <= Date.now() + 60_000 &&
-    nextTokens.refreshToken
-  ) {
-    const refreshed = await client.refreshAccessToken();
-    const credentials = refreshed.credentials;
-
-    if (credentials.access_token) {
-      nextTokens.accessToken = credentials.access_token;
-      nextTokens.expiryDate = credentials.expiry_date ?? undefined;
-      if (credentials.refresh_token) {
-        nextTokens.refreshToken = credentials.refresh_token;
-      }
-      client.setCredentials(credentials);
-    }
+function assertTokenValid(tokens: GoogleAccessToken) {
+  if (!tokens.accessToken) {
+    throw new Error("Google Calendar is not connected");
   }
 
-  return { client, tokens: nextTokens };
+  if (tokens.expiryDate && tokens.expiryDate <= Date.now() + 30_000) {
+    throw new Error("TOKEN_EXPIRED");
+  }
 }
 
 function parseEventTime(
@@ -110,12 +54,12 @@ type RawListedEvent = {
 };
 
 async function listRawEvents(
-  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  tokens: GoogleAccessToken,
   timeMin: string,
   timeMax: string,
 ): Promise<RawListedEvent[]> {
-  const { client } = await getAuthorizedClient(tokens);
-  const calendar = google.calendar({ version: "v3", auth: client });
+  assertTokenValid(tokens);
+  const calendar = google.calendar({ version: "v3", auth: getAuthClient(tokens.accessToken) });
 
   const response = await calendar.events.list({
     calendarId: "primary",
@@ -148,7 +92,7 @@ async function listRawEvents(
 }
 
 export async function listExternalBusyEvents(
-  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  tokens: GoogleAccessToken,
   timeMin: string,
   timeMax: string,
 ) {
@@ -167,7 +111,7 @@ export async function listExternalBusyEvents(
 }
 
 export async function listCalendarEvents(
-  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  tokens: GoogleAccessToken,
   timeMin: string,
   timeMax: string,
 ) {
@@ -192,13 +136,13 @@ export async function listCalendarEvents(
 }
 
 export async function upsertScheduledBlocks(
-  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  tokens: GoogleAccessToken,
   blocks: ScheduledBlock[],
   timeMin: string,
   timeMax: string,
 ) {
-  const { client } = await getAuthorizedClient(tokens);
-  const calendar = google.calendar({ version: "v3", auth: client });
+  assertTokenValid(tokens);
+  const calendar = google.calendar({ version: "v3", auth: getAuthClient(tokens.accessToken) });
   const existing = await listRawEvents(tokens, timeMin, timeMax);
   const existingByKey = new Map(
     existing.filter((event) => event.yoteiKey).map((event) => [event.yoteiKey!, event.id]),
@@ -251,37 +195,4 @@ export async function upsertScheduledBlocks(
   }
 
   return { created, updated };
-}
-
-export async function pushEventsToCalendar(
-  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
-  events: Array<{ title: string; start: string; end: string; description?: string }>,
-) {
-  const { client } = await getAuthorizedClient(tokens);
-  const calendar = google.calendar({ version: "v3", auth: client });
-  const created: string[] = [];
-
-  for (const event of events) {
-    const response = await calendar.events.insert({
-      calendarId: "primary",
-      requestBody: {
-        summary: event.title,
-        description: event.description,
-        start: {
-          dateTime: event.start,
-          timeZone: TIMEZONE,
-        },
-        end: {
-          dateTime: event.end,
-          timeZone: TIMEZONE,
-        },
-      },
-    });
-
-    if (response.data.id) {
-      created.push(response.data.id);
-    }
-  }
-
-  return created;
 }

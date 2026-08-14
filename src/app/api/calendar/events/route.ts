@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getGoogleTokens, saveGoogleTokens } from "@/lib/auth";
-import { getAuthorizedClient, listCalendarEvents } from "@/lib/google-calendar";
+import { getGoogleTokens } from "@/lib/auth";
+import { listCalendarEvents } from "@/lib/google-calendar";
 
 export async function GET(request: NextRequest) {
   const tokens = await getGoogleTokens();
-  if (!tokens) {
+  if (!tokens?.accessToken) {
     return NextResponse.json({ error: "Google Calendar is not connected" }, { status: 401 });
   }
 
@@ -16,12 +16,11 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const { tokens: refreshedTokens } = await getAuthorizedClient(tokens);
-    await saveGoogleTokens(refreshedTokens);
-    const events = await listCalendarEvents(refreshedTokens, timeMin, timeMax);
+    const events = await listCalendarEvents(tokens, timeMin, timeMax);
     return NextResponse.json({ events });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch events";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = message === "TOKEN_EXPIRED" ? 401 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

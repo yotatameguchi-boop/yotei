@@ -1,25 +1,22 @@
-import { getGoogleTokens, googleConfigured, saveGoogleTokens } from "@/lib/auth";
+import { getGoogleTokens, tokenValid } from "@/lib/auth";
 import { ScheduleApp } from "@/components/schedule-app";
-import { getAuthorizedClient, listCalendarEvents } from "@/lib/google-calendar";
+import { googleCalendarAvailable, getGoogleClientId } from "@/lib/google-config";
+import { listCalendarEvents } from "@/lib/google-calendar";
 import { defaultRange } from "@/lib/storage";
 
 export default async function Home() {
   const tokens = await getGoogleTokens();
-  const configured = googleConfigured();
-  const connected = Boolean(tokens?.accessToken);
+  const configured = googleCalendarAvailable();
+  const connected = tokenValid(tokens);
   const range = defaultRange();
-  const redirectUri =
-    process.env.GOOGLE_REDIRECT_URI ??
-    `${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/api/auth/callback`;
+  const googleClientId = getGoogleClientId() ?? "";
 
   let initialGoogleEvents: Awaited<ReturnType<typeof listCalendarEvents>> = [];
 
-  if (tokens?.accessToken) {
+  if (connected && tokens) {
     try {
-      const { tokens: refreshedTokens } = await getAuthorizedClient(tokens);
-      await saveGoogleTokens(refreshedTokens);
       initialGoogleEvents = await listCalendarEvents(
-        refreshedTokens,
+        tokens,
         range.start,
         range.end,
       );
@@ -33,7 +30,7 @@ export default async function Home() {
       initialConnected={connected}
       initialConfigured={configured}
       initialGoogleEvents={initialGoogleEvents}
-      redirectUri={redirectUri}
+      googleClientId={googleClientId}
       rangeStart={range.start}
       rangeEnd={range.end}
     />

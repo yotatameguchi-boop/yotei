@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getGoogleTokens, saveGoogleTokens } from "@/lib/auth";
-import { getAuthorizedClient, pushEventsToCalendar } from "@/lib/google-calendar";
+import { getGoogleTokens } from "@/lib/auth";
+import { upsertScheduledBlocks } from "@/lib/google-calendar";
+import type { ScheduledBlock } from "@/lib/types";
 
 type PushBody = {
   events: Array<{
@@ -9,26 +10,34 @@ type PushBody = {
     end: string;
     description?: string;
   }>;
+  rangeStart?: string;
+  rangeEnd?: string;
+  scheduled?: ScheduledBlock[];
 };
 
 export async function POST(request: NextRequest) {
   const tokens = await getGoogleTokens();
-  if (!tokens) {
+  if (!tokens?.accessToken) {
     return NextResponse.json({ error: "Google Calendar is not connected" }, { status: 401 });
   }
 
   const body = (await request.json()) as PushBody;
-  if (!body.events?.length) {
-    return NextResponse.json({ error: "events are required" }, { status: 400 });
+
+  if (body.scheduled?.length && body.rangeStart && body.rangeEnd) {
+    try {
+      const pushed = await upsertScheduledBlocks(
+        tokens,
+        body.scheduled,
+        body.rangeStart,
+        body.rangeEnd,
+      );
+      return NextResponse.json({ createdCount: pushed.created + pushed.updated, ...pushed });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to push events";
+      const status = message === "TOKEN_EXPIRED" ? 401 : 500;
+      return NextResponse.json({ error: message }, { status });
+    }
   }
 
-  try {
-    const { tokens: refreshedTokens } = await getAuthorizedClient(tokens);
-    await saveGoogleTokens(refreshedTokens);
-    const created = await pushEventsToCalendar(refreshedTokens, body.events);
-    return NextResponse.json({ createdCount: created.length, created });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to push events";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  return NextResponse.json({ error: "scheduled blocks are required" }, { status: 400 });
 }
