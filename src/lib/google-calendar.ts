@@ -1,10 +1,13 @@
 import { google } from "googleapis";
-import type { GoogleTokenPayload } from "./types";
+import type { ScheduledBlock } from "./types";
+import { buildYoteiKey, yoteiEventTitle } from "./yotei-calendar-key";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
   "https://www.googleapis.com/auth/calendar.events",
 ];
+
+const TIMEZONE = "Asia/Tokyo";
 
 export function getOAuthClient() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -30,7 +33,7 @@ export function getAuthUrl(state: string): string {
   });
 }
 
-export async function exchangeCodeForTokens(code: string): Promise<GoogleTokenPayload> {
+export async function exchangeCodeForTokens(code: string) {
   const client = getOAuthClient();
   const { tokens } = await client.getToken(code);
 
@@ -45,11 +48,13 @@ export async function exchangeCodeForTokens(code: string): Promise<GoogleTokenPa
   };
 }
 
-export async function getAuthorizedClient(
-  tokens: GoogleTokenPayload,
-): Promise<{ client: ReturnType<typeof getOAuthClient>; tokens: GoogleTokenPayload }> {
+export async function getAuthorizedClient(tokens: {
+  accessToken: string;
+  refreshToken?: string;
+  expiryDate?: number;
+}) {
   const client = getOAuthClient();
-  const nextTokens: GoogleTokenPayload = { ...tokens };
+  const nextTokens = { ...tokens };
 
   client.setCredentials({
     access_token: nextTokens.accessToken,
@@ -95,11 +100,20 @@ function parseEventTime(
   return null;
 }
 
-export async function listCalendarEvents(
-  tokens: GoogleTokenPayload,
+type RawListedEvent = {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  yoteiKey?: string;
+  yoteiKind?: "habit" | "task";
+};
+
+async function listRawEvents(
+  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
   timeMin: string,
   timeMax: string,
-) {
+): Promise<RawListedEvent[]> {
   const { client } = await getAuthorizedClient(tokens);
   const calendar = google.calendar({ version: "v3", auth: client });
 
@@ -116,24 +130,131 @@ export async function listCalendarEvents(
       const start = parseEventTime(item.start?.dateTime, item.start?.date, false);
       const end = parseEventTime(item.end?.dateTime, item.end?.date, true);
 
-      if (!start || !end) {
+      if (!start || !end || !item.id) {
         return null;
       }
 
-      return {
-        id: item.id ?? crypto.randomUUID(),
+      const event: RawListedEvent = {
+        id: item.id,
         title: item.summary ?? "（無題）",
         start,
         end,
-        source: "google" as const,
-        color: "#647880",
+        yoteiKey: item.extendedProperties?.private?.yoteiKey,
+        yoteiKind: item.extendedProperties?.private?.yoteiKind as "habit" | "task" | undefined,
       };
+      return event;
     })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
+    .filter((item): item is RawListedEvent => item !== null);
+}
+
+export async function listExternalBusyEvents(
+  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  timeMin: string,
+  timeMax: string,
+) {
+  const events = await listRawEvents(tokens, timeMin, timeMax);
+
+  return events
+    .filter((event) => !event.yoteiKey)
+    .map((event) => ({
+      id: event.id,
+      title: event.title,
+      start: event.start,
+      end: event.end,
+      source: "google" as const,
+      color: "#647880",
+    }));
+}
+
+export async function listCalendarEvents(
+  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  timeMin: string,
+  timeMax: string,
+) {
+  const events = await listRawEvents(tokens, timeMin, timeMax);
+
+  return events.map((event) => ({
+    id: event.id,
+    title: event.title,
+    start: event.start,
+    end: event.end,
+    source: (event.yoteiKind ?? (event.yoteiKey ? "habit" : "google")) as
+      | "google"
+      | "habit"
+      | "task",
+    color:
+      event.yoteiKind === "task"
+        ? "#8ec4b0"
+        : event.yoteiKey
+          ? "#6aabbf"
+          : "#647880",
+  }));
+}
+
+export async function upsertScheduledBlocks(
+  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
+  blocks: ScheduledBlock[],
+  timeMin: string,
+  timeMax: string,
+) {
+  const { client } = await getAuthorizedClient(tokens);
+  const calendar = google.calendar({ version: "v3", auth: client });
+  const existing = await listRawEvents(tokens, timeMin, timeMax);
+  const existingByKey = new Map(
+    existing.filter((event) => event.yoteiKey).map((event) => [event.yoteiKey!, event.id]),
+  );
+
+  let created = 0;
+  let updated = 0;
+
+  for (const block of blocks) {
+    if (block.kind === "google") {
+      continue;
+    }
+
+    const yoteiKey = buildYoteiKey(block);
+    const requestBody = {
+      summary: yoteiEventTitle(block.title),
+      description: "yotei アプリから自動同期",
+      start: {
+        dateTime: block.start,
+        timeZone: TIMEZONE,
+      },
+      end: {
+        dateTime: block.end,
+        timeZone: TIMEZONE,
+      },
+      extendedProperties: {
+        private: {
+          yoteiKey,
+          yoteiKind: block.kind,
+          yoteiRefId: block.refId,
+        },
+      },
+    };
+
+    const existingId = existingByKey.get(yoteiKey);
+    if (existingId) {
+      await calendar.events.update({
+        calendarId: "primary",
+        eventId: existingId,
+        requestBody,
+      });
+      updated += 1;
+    } else {
+      await calendar.events.insert({
+        calendarId: "primary",
+        requestBody,
+      });
+      created += 1;
+    }
+  }
+
+  return { created, updated };
 }
 
 export async function pushEventsToCalendar(
-  tokens: GoogleTokenPayload,
+  tokens: { accessToken: string; refreshToken?: string; expiryDate?: number },
   events: Array<{ title: string; start: string; end: string; description?: string }>,
 ) {
   const { client } = await getAuthorizedClient(tokens);
@@ -148,11 +269,11 @@ export async function pushEventsToCalendar(
         description: event.description,
         start: {
           dateTime: event.start,
-          timeZone: "Asia/Tokyo",
+          timeZone: TIMEZONE,
         },
         end: {
           dateTime: event.end,
-          timeZone: "Asia/Tokyo",
+          timeZone: TIMEZONE,
         },
       },
     });

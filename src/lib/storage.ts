@@ -2,6 +2,20 @@ import type { Goal, Habit } from "./types";
 
 const HABITS_KEY = "yotei-habits";
 const GOALS_KEY = "yotei-goals";
+const AUTO_SYNC_KEY = "yotei-auto-sync";
+
+export function loadAutoSync(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const raw = window.localStorage.getItem(AUTO_SYNC_KEY);
+  return raw === null ? true : raw === "1";
+}
+
+export function saveAutoSync(enabled: boolean) {
+  window.localStorage.setItem(AUTO_SYNC_KEY, enabled ? "1" : "0");
+}
 
 export function loadHabits(): Habit[] {
   if (typeof window === "undefined") {
