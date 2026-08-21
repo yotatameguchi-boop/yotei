@@ -5,11 +5,9 @@ import { listCalendarEvents } from "@/lib/google-calendar";
 import { listGoals } from "@/lib/db/goals";
 import { listHabits } from "@/lib/db/habits";
 import { DatabaseNotConfiguredError } from "@/lib/db";
-import { getLatestSyncRun, getUserPreferences, upsertUserPreferences } from "@/lib/db/preferences";
-import { replaceGoals } from "@/lib/db/goals";
-import { replaceHabits } from "@/lib/db/habits";
+import { getLatestSyncRun, getUserPreferences } from "@/lib/db/preferences";
 import { defaultRange } from "@/lib/storage";
-import { getOrCreateSessionUser } from "@/lib/user-session";
+import { getSessionUser } from "@/lib/user-session";
 import {
   createDemoGoals,
   createDemoHabits,
@@ -27,26 +25,20 @@ export default async function Home() {
   let goals: Goal[] = createDemoGoals();
   let preferences = {
     autoSync: true,
-    initialized: true,
+    initialized: false,
     useDemoEvents: false,
   };
   let latestSyncAt: string | null = null;
   let dbConfigured = true;
 
   try {
-    const user = await getOrCreateSessionUser();
-    preferences = await getUserPreferences(user.id);
-    habits = await listHabits(user.id);
-    goals = await listGoals(user.id);
-    const latestSync = await getLatestSyncRun(user.id);
-    latestSyncAt = latestSync?.syncedAt ?? null;
-
-    if (!preferences.initialized && habits.length === 0 && goals.length === 0) {
-      habits = createDemoHabits();
-      goals = createDemoGoals();
-      await replaceHabits(user.id, habits);
-      await replaceGoals(user.id, goals);
-      preferences = await upsertUserPreferences(user.id, { initialized: true });
+    const user = await getSessionUser();
+    if (user) {
+      preferences = await getUserPreferences(user.id);
+      habits = await listHabits(user.id);
+      goals = await listGoals(user.id);
+      const latestSync = await getLatestSyncRun(user.id);
+      latestSyncAt = latestSync?.syncedAt ?? null;
     }
   } catch (error) {
     if (error instanceof DatabaseNotConfiguredError) {

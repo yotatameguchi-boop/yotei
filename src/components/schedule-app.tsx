@@ -111,7 +111,31 @@ export function ScheduleApp({
     void (async () => {
       try {
         const migrated = await migrateLegacyStorageIfNeeded();
-        if (migrated) {
+        if (dbConfigured) {
+          const response = await fetch("/api/user/bootstrap");
+          if (response.ok) {
+            const data = (await response.json()) as {
+              habits: Habit[];
+              goals: Goal[];
+              preferences: {
+                autoSync: boolean;
+                initialized: boolean;
+                useDemoEvents: boolean;
+              };
+              latestSync: { syncedAt: string } | null;
+            };
+            if (!cancelled) {
+              setHabits(data.habits);
+              setGoals(data.goals);
+              setAutoSync(data.preferences.autoSync);
+              setUseDemoEvents(data.preferences.useDemoEvents);
+              setLastSyncedAt(data.latestSync?.syncedAt ?? null);
+              if (migrated) {
+                setMessage("ローカルデータをサーバーに移行しました");
+              }
+            }
+          }
+        } else if (migrated) {
           const data = await fetchUserData();
           if (!cancelled) {
             setHabits(data.habits);
@@ -135,7 +159,7 @@ export function ScheduleApp({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dbConfigured]);
 
   const refreshAuthStatus = useCallback(async () => {
     const response = await fetch("/api/auth/status");
