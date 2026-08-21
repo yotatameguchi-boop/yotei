@@ -9,19 +9,15 @@ import { ScheduleTimeline } from "@/components/schedule-timeline";
 import { SyncStatus } from "@/components/sync-status";
 import { useGoogleTokenRefresh } from "@/components/google-sign-in-button";
 import { WeekCalendar } from "@/components/week-calendar";
-import {
-  createDemoGoals,
-  createDemoGoogleEvents,
-  createDemoHabits,
-} from "@/lib/demo-data";
+import { createDemoGoogleEvents } from "@/lib/demo-data";
 import { toTimelineEvents } from "@/lib/scheduler";
 import {
-  loadAutoSync,
-  loadGoals,
-  loadHabits,
-  saveAutoSync,
-  saveGoals,
-  saveHabits,
+  fetchUserData,
+  migrateLegacyStorageIfNeeded,
+  persistGoals,
+  persistHabits,
+  persistPreferences,
+  seedDemoData,
 } from "@/lib/storage";
 import type {
   CalendarEvent,
@@ -31,9 +27,8 @@ import type {
   ScheduledBlock,
 } from "@/lib/types";
 
-const INIT_KEY = "yotei-initialized";
-const DEMO_EVENTS_KEY = "yotei-use-demo-events";
 const AUTO_SYNC_DEBOUNCE_MS = 1500;
+const SAVE_DEBOUNCE_MS = 800;
 
 type SyncResponse = {
   googleEvents: CalendarEvent[];
@@ -47,6 +42,11 @@ type ScheduleAppProps = {
   initialConnected: boolean;
   initialConfigured: boolean;
   initialGoogleEvents: CalendarEvent[];
+  initialHabits: Habit[];
+  initialGoals: Goal[];
+  initialAutoSync: boolean;
+  initialUseDemoEvents: boolean;
+  initialLastSyncedAt: string | null;
   googleClientId: string;
   rangeStart: string;
   rangeEnd: string;
@@ -56,38 +56,17 @@ export function ScheduleApp({
   initialConnected,
   initialConfigured,
   initialGoogleEvents,
+  initialHabits,
+  initialGoals,
+  initialAutoSync,
+  initialUseDemoEvents,
+  initialLastSyncedAt,
   googleClientId,
   rangeStart,
   rangeEnd,
 }: ScheduleAppProps) {
-  const [habits, setHabits] = useState<Habit[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    const stored = loadHabits();
-    const initialized = window.localStorage.getItem(INIT_KEY) === "1";
-    if (!initialized && stored.length === 0) {
-      window.localStorage.setItem(INIT_KEY, "1");
-      window.localStorage.setItem(DEMO_EVENTS_KEY, "0");
-      return createDemoHabits();
-    }
-
-    return stored;
-  });
-  const [goals, setGoals] = useState<Goal[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    const stored = loadGoals();
-    const initialized = window.localStorage.getItem(INIT_KEY) === "1";
-    if (!initialized && stored.length === 0) {
-      return createDemoGoals();
-    }
-
-    return stored;
-  });
+  const [habits, setHabits] = useState<Habit[]>(initialHabits);
+  const [goals, setGoals] = useState<Goal[]>(initialGoals);
   const [googleEvents, setGoogleEvents] = useState<CalendarEvent[]>(initialGoogleEvents);
   const [scheduled, setScheduled] = useState<ScheduledBlock[]>([]);
   const [unscheduled, setUnscheduled] = useState<
@@ -97,20 +76,16 @@ export function ScheduleApp({
   const [configured, setConfigured] = useState(initialConfigured);
   const [syncing, setSyncing] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [autoSync, setAutoSync] = useState(loadAutoSync);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [autoSync, setAutoSync] = useState(initialAutoSync);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(initialLastSyncedAt);
   const [message, setMessage] = useState<string | null>(() => {
     if (initialGoogleEvents.length > 0) {
       return `Googleカレンダーから ${initialGoogleEvents.length} 件の予定を読み込みました`;
     }
     return null;
   });
-  const [useDemoEvents, setUseDemoEvents] = useState(() => {
-    if (typeof window === "undefined") {
-      return false;
-    }
-    return window.localStorage.getItem(DEMO_EVENTS_KEY) === "1";
-  });
+  const [useDemoEvents, setUseDemoEvents] = useState(initialUseDemoEvents);
+  const [hydrated, setHydrated] = useState(false);
 
   const habitsRef = useRef(habits);
   const goalsRef = useRef(goals);
@@ -127,6 +102,38 @@ export function ScheduleApp({
   }, [habits, goals, connected, autoSync]);
 
   const { refreshSilently } = useGoogleTokenRefresh(googleClientId, connected);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const migrated = await migrateLegacyStorageIfNeeded();
+        if (migrated) {
+          const data = await fetchUserData();
+          if (!cancelled) {
+            setHabits(data.habits);
+            setGoals(data.goals);
+            setAutoSync(data.preferences.autoSync);
+            setUseDemoEvents(data.preferences.useDemoEvents);
+            setMessage("ローカルデータをサーバーに移行しました");
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setMessage("サーバーへの接続に失敗しました。ページを再読み込みしてください。");
+        }
+      } finally {
+        if (!cancelled) {
+          setHydrated(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshAuthStatus = useCallback(async () => {
     const response = await fetch("/api/auth/status");
@@ -151,11 +158,10 @@ export function ScheduleApp({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          habits: habitsRef.current,
-          goals: goalsRef.current,
           rangeStart,
           rangeEnd,
           pushToGoogle: true,
+          useStoredData: true,
         }),
       });
 
@@ -166,11 +172,10 @@ export function ScheduleApp({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              habits: habitsRef.current,
-              goals: goalsRef.current,
               rangeStart,
               rangeEnd,
               pushToGoogle: true,
+              useStoredData: true,
             }),
           });
         }
@@ -187,7 +192,7 @@ export function ScheduleApp({
       setUnscheduled(data.unscheduled);
       setLastSyncedAt(data.syncedAt);
       setUseDemoEvents(false);
-      window.localStorage.setItem(DEMO_EVENTS_KEY, "0");
+      void persistPreferences({ useDemoEvents: false });
       setMessage(
         `自動同期完了（Google ${data.googleEvents.length} 件 / 配置 ${data.scheduled.length} 件 / 新規 ${data.pushed.created}・更新 ${data.pushed.updated}）`,
       );
@@ -219,11 +224,10 @@ export function ScheduleApp({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          habits: habitsRef.current,
-          goals: goalsRef.current,
           googleEvents: events,
           rangeStart,
           rangeEnd,
+          useStoredData: true,
         }),
       });
 
@@ -250,23 +254,45 @@ export function ScheduleApp({
   }, [runGoogleSync]);
 
   useEffect(() => {
-    if (habits.length > 0 || window.localStorage.getItem(INIT_KEY) === "1") {
-      saveHabits(habits);
+    if (!hydrated) {
+      return;
     }
-  }, [habits]);
+
+    const timer = window.setTimeout(() => {
+      void persistHabits(habits).catch(() => {
+        setMessage("習慣の保存に失敗しました");
+      });
+    }, SAVE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [habits, hydrated]);
 
   useEffect(() => {
-    if (goals.length > 0 || window.localStorage.getItem(INIT_KEY) === "1") {
-      saveGoals(goals);
+    if (!hydrated) {
+      return;
     }
-  }, [goals]);
+
+    const timer = window.setTimeout(() => {
+      void persistGoals(goals).catch(() => {
+        setMessage("ゴールの保存に失敗しました");
+      });
+    }, SAVE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [goals, hydrated]);
 
   useEffect(() => {
-    saveAutoSync(autoSync);
-  }, [autoSync]);
+    if (!hydrated) {
+      return;
+    }
+
+    void persistPreferences({ autoSync }).catch(() => {
+      setMessage("設定の保存に失敗しました");
+    });
+  }, [autoSync, hydrated]);
 
   useEffect(() => {
-    if (!connected || !autoSync) {
+    if (!connected || !autoSync || !hydrated) {
       return;
     }
 
@@ -284,7 +310,7 @@ export function ScheduleApp({
     }, delay);
 
     return () => window.clearTimeout(timer);
-  }, [connected, autoSync, habits, goals]);
+  }, [connected, autoSync, habits, goals, hydrated]);
 
   const handleConnected = useCallback(() => {
     pendingConnectSyncRef.current = true;
@@ -315,17 +341,21 @@ export function ScheduleApp({
     return toTimelineEvents(googleEvents, scheduled);
   }, [connected, googleEvents, scheduled]);
 
-  function loadDemoData() {
-    setHabits(createDemoHabits());
-    setGoals(createDemoGoals());
-    setUseDemoEvents(true);
-    window.localStorage.setItem(DEMO_EVENTS_KEY, "1");
-    setMessage("デモデータを読み込みました");
+  async function loadDemoData() {
+    try {
+      const data = await seedDemoData();
+      setHabits(data.habits);
+      setGoals(data.goals);
+      setUseDemoEvents(true);
+      setMessage("デモデータを読み込みました");
+    } catch {
+      setMessage("デモデータの読み込みに失敗しました");
+    }
   }
 
   function toggleDemoEvents(enabled: boolean) {
     setUseDemoEvents(enabled);
-    window.localStorage.setItem(DEMO_EVENTS_KEY, enabled ? "1" : "0");
+    void persistPreferences({ useDemoEvents: enabled });
     if (!enabled && !connected) {
       setGoogleEvents([]);
     }
@@ -388,7 +418,9 @@ export function ScheduleApp({
               >
                 {loading ? "生成中..." : "スケジュールを生成（オフライン）"}
               </button>
-              <button type="button" className="btn-secondary" onClick={loadDemoData}>
+              <button type="button" className="btn-secondary" onClick={() => {
+                void loadDemoData();
+              }}>
                 デモデータ
               </button>
             </div>

@@ -21,6 +21,10 @@
 # misc
 .DS_Store
 *.pem
+/data/
+/drizzle/
+/.tools/
+/.tools/
 
 # debug
 npm-debug.log*
