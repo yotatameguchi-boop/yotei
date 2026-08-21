@@ -8,9 +8,26 @@ let client: Client | null = null;
 let database: LibSQLDatabase<typeof schema> | null = null;
 let migrationPromise: Promise<void> | null = null;
 
+export class DatabaseNotConfiguredError extends Error {
+  constructor() {
+    super(
+      "TURSO_DATABASE_URL is required in production. Run: bash scripts/setup-turso.sh",
+    );
+    this.name = "DatabaseNotConfiguredError";
+  }
+}
+
+function isServerlessProduction(): boolean {
+  return Boolean(process.env.VERCEL) && process.env.NODE_ENV === "production";
+}
+
 function getDatabaseUrl(): string {
   if (process.env.TURSO_DATABASE_URL) {
     return process.env.TURSO_DATABASE_URL;
+  }
+
+  if (isServerlessProduction()) {
+    throw new DatabaseNotConfiguredError();
   }
 
   const dataDir = path.join(process.cwd(), "data");

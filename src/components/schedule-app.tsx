@@ -47,6 +47,7 @@ type ScheduleAppProps = {
   initialAutoSync: boolean;
   initialUseDemoEvents: boolean;
   initialLastSyncedAt: string | null;
+  dbConfigured?: boolean;
   googleClientId: string;
   rangeStart: string;
   rangeEnd: string;
@@ -61,6 +62,7 @@ export function ScheduleApp({
   initialAutoSync,
   initialUseDemoEvents,
   initialLastSyncedAt,
+  dbConfigured = true,
   googleClientId,
   rangeStart,
   rangeEnd,
@@ -439,6 +441,13 @@ export function ScheduleApp({
         {message ? (
           <p className="rounded-2xl border border-[var(--line)] bg-white/70 px-4 py-3 text-sm text-[var(--muted)]">
             {message}
+          </p>
+        ) : null}
+
+        {!dbConfigured ? (
+          <p className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            本番データベース（Turso）が未設定です。`bash scripts/setup-turso.sh` を実行して
+            TURSO_DATABASE_URL を Vercel に追加してください。
           </p>
         ) : null}
       </div>
